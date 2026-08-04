@@ -5,7 +5,12 @@ export async function fetchCreatorCodes(): Promise<string[]> {
   try {
     const res = await fetch("/api/northbeam/creators");
     if (!res.ok) {
-      throw new Error("Failed to fetch creator codes");
+      let msg = "Failed to fetch creator codes";
+      try {
+        const errJson = await res.json();
+        if (errJson?.error) msg = errJson.error;
+      } catch {}
+      throw new Error(msg);
     }
     const data = await res.json();
     const rawCodes: string[] = data.creators || [];
@@ -64,7 +69,12 @@ export async function fetchCreatorMetrics(
     );
 
     if (!res.ok) {
-      throw new Error("Failed to fetch creator metrics");
+      let msg = "Failed to fetch creator metrics";
+      try {
+        const errJson = await res.json();
+        if (errJson?.error) msg = errJson.error;
+      } catch {}
+      throw new Error(msg);
     }
 
     const data = await res.json();

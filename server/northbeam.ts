@@ -623,8 +623,12 @@ export async function getMetrics(creatorCode: string, dateRange: string) {
       const data = await fetchMetricsFromNorthbeam(normalizedTargetCode, dateRange);
       metricsCache.set(cacheKey, { timestamp: Date.now(), data });
       return data;
-    } catch (err) {
-      console.warn(`[Northbeam Error] Failed fetching live export for ${normalizedTargetCode} (${dateRange}):`, err);
+    } catch (err: any) {
+      console.warn(`[Northbeam Error] Failed fetching live export for ${normalizedTargetCode} (${dateRange}):`, err?.message || err);
+      // If API keys are present, rethrow the error so the API handler can send a 504 with a retryable message
+      if (process.env.NORTHBEAM_API_KEY && process.env.NORTHBEAM_CLIENT_ID) {
+        throw err;
+      }
       const fallbackData = generateFallbackMetrics(normalizedTargetCode, dateRange);
       metricsCache.set(cacheKey, { timestamp: Date.now(), data: fallbackData });
       return fallbackData;
@@ -729,12 +733,19 @@ async function fetchMetricsFromNorthbeam(normalizedTargetCode: string, dateRange
 
   console.log(`[Northbeam STEP 1 SUCCESS] Saved Export ID: ${exportId}`);
 
-  // STEP 2 — Poll for Result
+  // STEP 2 — Poll for Result with 45s safety timeout (comfortably under Vercel 60s maxDuration limit)
   console.log(`[Northbeam STEP 2] Polling result for export ID ${exportId}...`);
   let resultData: any = null;
   let pollSuccess = false;
+  const pollStartTime = Date.now();
+  const MAX_POLL_MS = 45000; // 45 seconds safety cutoff
 
-  for (let attempt = 1; attempt <= 40; attempt++) {
+  for (let attempt = 1; attempt <= 30; attempt++) {
+    if (Date.now() - pollStartTime > MAX_POLL_MS) {
+      console.warn(`[Northbeam STEP 2] Polling reached safety timeout threshold of 45s for export ID ${exportId}`);
+      break;
+    }
+
     await new Promise((resolve) => setTimeout(resolve, 1500));
     const pollRes = await fetch(`https://api.northbeam.io/v1/exports/data-export/result/${exportId}`, {
       method: "GET",
@@ -746,7 +757,7 @@ async function fetchMetricsFromNorthbeam(normalizedTargetCode: string, dateRange
 
     if (pollRes.ok) {
       resultData = await pollRes.json();
-      console.log(`[Northbeam STEP 2 Poll ${attempt}/40] Status: ${resultData?.status}`);
+      console.log(`[Northbeam STEP 2 Poll ${attempt}/30] Status: ${resultData?.status}`);
 
       if (resultData?.status === "SUCCESS" || (Array.isArray(resultData?.result) && resultData.result.length > 0)) {
         pollSuccess = true;
@@ -757,12 +768,12 @@ async function fetchMetricsFromNorthbeam(normalizedTargetCode: string, dateRange
         throw new Error(`Northbeam export job status: FAILED`);
       }
     } else {
-      console.warn(`[Northbeam STEP 2 Poll ${attempt}/40] HTTP ${pollRes.status}`);
+      console.warn(`[Northbeam STEP 2 Poll ${attempt}/30] HTTP ${pollRes.status}`);
     }
   }
 
   if (!pollSuccess || !resultData || !Array.isArray(resultData.result) || resultData.result.length === 0) {
-    throw new Error(`Northbeam export polling timed out or status was not SUCCESS after 60s`);
+    throw new Error(`Northbeam is taking longer than usual to respond, please try again`);
   }
 
   const csvUrl = resultData.result[0];
@@ -819,21 +830,46 @@ async function fetchMetricsFromNorthbeam(normalizedTargetCode: string, dateRange
 
   for (const row of filteredRows) {
     const adName = (row.ad_name || row.breakdown_ad_consolidation || "Ad Campaign").trim();
-    const rowSpend = parseFloat(row.spend) || 0;
 
-    // Strict Accrual revenue extraction: use row.rev if present, or row.roas if Northbeam places accrual rev metric in the roas column
-    let rowRev = 0;
-    if (row.rev !== undefined && row.rev !== null && String(row.rev).trim() !== "") {
-      rowRev = parseFloat(row.rev) || 0;
-    } else if (row.roas !== undefined && row.roas !== null && String(row.roas).trim() !== "") {
-      rowRev = parseFloat(row.roas) || 0;
-    }
-
-    const rowTxns = parseFloat(row.transactions || row.txns || row.orders) || 0;
-    const rowAov = parseFloat(row.aov) || 0;
+    // 1. Raw cell extraction and diagnostic logging
+    const rawRevStr = row.rev !== undefined && row.rev !== null ? String(row.rev).trim() : "";
+    const rawRoasStr = row.roas !== undefined && row.roas !== null ? String(row.roas).trim() : "";
+    const rawSpendStr = row.spend !== undefined && row.spend !== null ? String(row.spend).trim() : "";
+    const rawTxnsStr = String(row.transactions || row.txns || row.orders || "").trim();
+    const rawAovStr = row.aov !== undefined && row.aov !== null ? String(row.aov).trim() : "";
 
     console.log(
-      `[Accrual Row Included] ad: "${adName}" | campaign: "${row.campaign_name || ''}" | mode: "${row.accounting_mode}" | window: "${row.attribution_window}" | spend: $${rowSpend} | parsed_rev: $${rowRev} (raw_rev: "${row.rev}", raw_roas: "${row.roas}") | txns: ${rowTxns} | aov: $${rowAov}`
+      `[RAW ROW CELL VALUES] ad: "${adName}" | raw_rev: "${rawRevStr}" | raw_roas: "${rawRoasStr}" | raw_spend: "${rawSpendStr}" | raw_txns: "${rawTxnsStr}" | raw_aov: "${rawAovStr}"`
+    );
+
+    const rowSpend = parseFloat(rawSpendStr) || 0;
+    const rowRoasVal = parseFloat(rawRoasStr) || 0;
+    const rowTxns = parseFloat(rawTxnsStr) || 0;
+    const rowAov = parseFloat(rawAovStr) || 0;
+
+    // Strict revenue extraction:
+    // If raw_rev is present and non-empty, use it.
+    // If raw_rev is blank/empty, reconstruct rev as roas * spend (mathematically consistent with Northbeam's export).
+    // If roas is also empty, fallback to aov * transactions.
+    let rowRev = 0;
+    let revDerivationMethod = "zero";
+
+    if (rawRevStr !== "") {
+      rowRev = parseFloat(rawRevStr) || 0;
+      revDerivationMethod = "raw_rev";
+    } else if (rawRoasStr !== "" && rowSpend > 0) {
+      rowRev = rowSpend * rowRoasVal;
+      revDerivationMethod = `roas_times_spend (${rowRoasVal} * ${rowSpend})`;
+    } else if (rowAov > 0 && rowTxns > 0) {
+      rowRev = rowAov * rowTxns;
+      revDerivationMethod = `aov_times_txns (${rowAov} * ${rowTxns})`;
+    } else {
+      rowRev = 0;
+      revDerivationMethod = "missing_data_zero";
+    }
+
+    console.log(
+      `[DERIVED ROW VALUES] ad: "${adName}" -> spend: $${rowSpend.toFixed(2)}, rev: $${rowRev.toFixed(4)} (${revDerivationMethod}), roas: ${(rowSpend > 0 ? rowRev / rowSpend : 0).toFixed(4)}, txns: ${rowTxns.toFixed(4)}, aov: $${rowAov.toFixed(2)}`
     );
 
     if (!adGroupMap.has(adName)) {
@@ -860,10 +896,13 @@ async function fetchMetricsFromNorthbeam(normalizedTargetCode: string, dateRange
     const spend = Number(g.spend.toFixed(2));
     const convValue = Number(g.rev.toFixed(2));
     // Recalculate ROAS strictly as rev / spend using corrected Accrual rev
-    const roas = spend > 0 ? Number((convValue / spend).toFixed(2)) : 0;
+    const roas = g.spend > 0 ? Number((g.rev / g.spend).toFixed(2)) : (spend > 0 ? Number((convValue / spend).toFixed(2)) : 0);
     const rawOrders = g.txns;
     const orders = rawOrders > 0 ? Number(rawOrders.toFixed(2)) : 0;
-    const aov = g.aov > 0 ? Number(g.aov.toFixed(2)) : (orders > 0 ? Number((convValue / orders).toFixed(2)) : 0);
+    // Per-ad AOV: prioritize Northbeam CSV's exact aov column if available, or compute from unrounded rev / txns
+    const aov = g.aov > 0
+      ? Number(g.aov.toFixed(2))
+      : (g.txns > 0 ? Number((g.rev / g.txns).toFixed(2)) : (orders > 0 ? Number((convValue / orders).toFixed(2)) : 0));
 
     return {
       adId: `nb_${normalizedTargetCode.toLowerCase()}_${idx + 1}`,
@@ -889,7 +928,20 @@ async function fetchMetricsFromNorthbeam(normalizedTargetCode: string, dateRange
   const totalOrders = Number(aggregatedAds.reduce((acc, a) => acc + (a.orders || 0), 0).toFixed(2));
   // Recalculate overall ROAS strictly as totalRev / totalSpend
   const overallRoas = totalSpend > 0 ? Number((totalRev / totalSpend).toFixed(2)) : 0;
-  const overallAov = totalOrders > 0 ? Number((totalRev / totalOrders).toFixed(2)) : 0;
+
+  // Unify summary AOV with per-ad source of truth:
+  // For single ad, matches the ad's AOV exactly ($247.13)
+  // For multiple ads, computes the weighted average AOV (total rev / total transactions) using unrounded sums
+  const unroundedTotalRev = Array.from(adGroupMap.values()).reduce((acc, g) => acc + g.rev, 0);
+  const unroundedTotalTxns = Array.from(adGroupMap.values()).reduce((acc, g) => acc + g.txns, 0);
+  const overallAov =
+    aggregatedAds.length === 1
+      ? aggregatedAds[0].aov
+      : unroundedTotalTxns > 0
+      ? Number((unroundedTotalRev / unroundedTotalTxns).toFixed(2))
+      : totalOrders > 0
+      ? Number((totalRev / totalOrders).toFixed(2))
+      : 0;
 
   console.log("=== STEP 5: FINAL AGGREGATED NUMBERS ===");
   console.log({
