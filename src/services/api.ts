@@ -95,7 +95,7 @@ export async function fetchCreatorMetrics(
       totalOrders += orders;
 
       const roas = typeof ad.roas === "number" ? ad.roas : (spend > 0 ? convValue / spend : 0);
-      const aov = typeof ad.aov === "number" && ad.aov > 0 ? ad.aov : (orders > 0 ? convValue / orders : 0);
+      const aov = typeof ad.aov === "number" ? ad.aov : (orders > 0 ? convValue / orders : 0);
       const estCommission = convValue * 0.10;
 
       return {
@@ -117,7 +117,7 @@ export async function fetchCreatorMetrics(
         : 0;
 
     const overallAov =
-      typeof summary.overallAov === "number" && summary.overallAov > 0
+      typeof summary.overallAov === "number"
         ? summary.overallAov
         : totalOrders > 0
         ? totalConvValue / totalOrders

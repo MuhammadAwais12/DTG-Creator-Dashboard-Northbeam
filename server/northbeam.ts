@@ -823,9 +823,25 @@ async function fetchMetricsFromNorthbeam(normalizedTargetCode: string, dateRange
   console.log(`[Northbeam STEP 4] ${filteredRows.length} Accrual performance rows selected (window "${windowToUse}")`);
 
   // Group rows by ad_name
+  interface AdRowData {
+    campaign: string;
+    spend: number;
+    rev: number;
+    txns: number;
+    aov: number;
+    rawAov: string;
+  }
+
   const adGroupMap = new Map<
     string,
-    { adName: string; spend: number; rev: number; txns: number; aov: number; status: string }
+    {
+      adName: string;
+      spend: number;
+      rev: number;
+      txns: number;
+      status: string;
+      rows: AdRowData[];
+    }
   >();
 
   for (const row of filteredRows) {
@@ -838,14 +854,14 @@ async function fetchMetricsFromNorthbeam(normalizedTargetCode: string, dateRange
     const rawTxnsStr = String(row.transactions || row.txns || row.orders || "").trim();
     const rawAovStr = row.aov !== undefined && row.aov !== null ? String(row.aov).trim() : "";
 
-    console.log(
-      `[RAW ROW CELL VALUES] ad: "${adName}" | raw_rev: "${rawRevStr}" | raw_roas: "${rawRoasStr}" | raw_spend: "${rawSpendStr}" | raw_txns: "${rawTxnsStr}" | raw_aov: "${rawAovStr}"`
-    );
-
     const rowSpend = parseFloat(rawSpendStr) || 0;
     const rowRoasVal = parseFloat(rawRoasStr) || 0;
     const rowTxns = parseFloat(rawTxnsStr) || 0;
     const rowAov = parseFloat(rawAovStr) || 0;
+
+    console.log(
+      `[RAW ROW CELL VALUES] ad: "${adName}" | campaign: "${row.campaign_name || ''}" | raw_aov: "${rawAovStr}" (parsed aov: ${rowAov}) | raw_txns: "${rawTxnsStr}" (parsed txns: ${rowTxns}) | raw_spend: "${rawSpendStr}" | raw_rev: "${rawRevStr}" | raw_roas: "${rawRoasStr}"`
+    );
 
     // Strict revenue extraction:
     // If raw_rev is present and non-empty, use it.
@@ -869,7 +885,7 @@ async function fetchMetricsFromNorthbeam(normalizedTargetCode: string, dateRange
     }
 
     console.log(
-      `[DERIVED ROW VALUES] ad: "${adName}" -> spend: $${rowSpend.toFixed(2)}, rev: $${rowRev.toFixed(4)} (${revDerivationMethod}), roas: ${(rowSpend > 0 ? rowRev / rowSpend : 0).toFixed(4)}, txns: ${rowTxns.toFixed(4)}, aov: $${rowAov.toFixed(2)}`
+      `[DERIVED ROW VALUES] ad: "${adName}" -> spend: $${rowSpend.toFixed(2)}, rev: $${rowRev.toFixed(4)} (${revDerivationMethod}), roas: ${(rowSpend > 0 ? rowRev / rowSpend : 0).toFixed(4)}, txns: ${rowTxns.toFixed(4)}, native_aov: $${rowAov.toFixed(2)}`
     );
 
     if (!adGroupMap.has(adName)) {
@@ -878,8 +894,8 @@ async function fetchMetricsFromNorthbeam(normalizedTargetCode: string, dateRange
         spend: 0,
         rev: 0,
         txns: 0,
-        aov: rowAov,
         status: row.status || "Active",
+        rows: [],
       });
     }
 
@@ -887,9 +903,14 @@ async function fetchMetricsFromNorthbeam(normalizedTargetCode: string, dateRange
     group.spend += rowSpend;
     group.rev += rowRev;
     group.txns += rowTxns;
-    if (rowAov > 0) {
-      group.aov = rowAov;
-    }
+    group.rows.push({
+      campaign: row.campaign_name || "",
+      spend: rowSpend,
+      rev: rowRev,
+      txns: rowTxns,
+      aov: rowAov,
+      rawAov: rawAovStr,
+    });
   }
 
   const aggregatedAds = Array.from(adGroupMap.values()).map((g, idx) => {
@@ -899,10 +920,35 @@ async function fetchMetricsFromNorthbeam(normalizedTargetCode: string, dateRange
     const roas = g.spend > 0 ? Number((g.rev / g.spend).toFixed(2)) : (spend > 0 ? Number((convValue / spend).toFixed(2)) : 0);
     const rawOrders = g.txns;
     const orders = rawOrders > 0 ? Number(rawOrders.toFixed(2)) : 0;
-    // Per-ad AOV: prioritize Northbeam CSV's exact aov column if available, or compute from unrounded rev / txns
-    const aov = g.aov > 0
-      ? Number(g.aov.toFixed(2))
-      : (g.txns > 0 ? Number((g.rev / g.txns).toFixed(2)) : (orders > 0 ? Number((convValue / orders).toFixed(2)) : 0));
+
+    // AOV Calculation:
+    // 1. Single row: use that row's raw native aov value directly from Northbeam
+    // 2. Multiple rows: combine using transactions-weighted average: Σ(aov_i × txns_i) / Σ(txns_i)
+    // If sum of txns is 0 or near-zero, return 0 (matching Northbeam's own convention)
+    let calculatedAov = 0;
+    if (g.rows.length === 1) {
+      calculatedAov = g.rows[0].aov;
+      console.log(
+        `[AD AOV (SINGLE ROW)] ad: "${g.adName}" -> raw native aov: ${g.rows[0].aov} (from CSV cell: "${g.rows[0].rawAov}")`
+      );
+    } else if (g.rows.length > 1) {
+      const sumWeightedAov = g.rows.reduce((sum, r) => sum + r.aov * r.txns, 0);
+      const sumTxns = g.rows.reduce((sum, r) => sum + r.txns, 0);
+
+      if (sumTxns > 0.000001) {
+        calculatedAov = sumWeightedAov / sumTxns;
+        console.log(
+          `[AD AOV (MULTI-ROW WEIGHTED)] ad: "${g.adName}" -> ${g.rows.length} rows, sum(aov*txns)=${sumWeightedAov.toFixed(4)}, sum(txns)=${sumTxns.toFixed(4)} -> weighted AOV: $${calculatedAov.toFixed(2)}`
+        );
+      } else {
+        calculatedAov = 0;
+        console.log(
+          `[AD AOV (MULTI-ROW ZERO TXNS)] ad: "${g.adName}" -> sum(txns)=0 -> AOV: $0`
+        );
+      }
+    }
+    const aov = Number(calculatedAov.toFixed(2));
+    console.log(`[FINAL COMBINED AD AOV] ad: "${g.adName}" -> final AOV: $${aov}`);
 
     return {
       adId: `nb_${normalizedTargetCode.toLowerCase()}_${idx + 1}`,
@@ -929,19 +975,29 @@ async function fetchMetricsFromNorthbeam(normalizedTargetCode: string, dateRange
   // Recalculate overall ROAS strictly as totalRev / totalSpend
   const overallRoas = totalSpend > 0 ? Number((totalRev / totalSpend).toFixed(2)) : 0;
 
-  // Unify summary AOV with per-ad source of truth:
-  // For single ad, matches the ad's AOV exactly ($247.13)
-  // For multiple ads, computes the weighted average AOV (total rev / total transactions) using unrounded sums
-  const unroundedTotalRev = Array.from(adGroupMap.values()).reduce((acc, g) => acc + g.rev, 0);
-  const unroundedTotalTxns = Array.from(adGroupMap.values()).reduce((acc, g) => acc + g.txns, 0);
-  const overallAov =
-    aggregatedAds.length === 1
-      ? aggregatedAds[0].aov
-      : unroundedTotalTxns > 0
-      ? Number((unroundedTotalRev / unroundedTotalTxns).toFixed(2))
-      : totalOrders > 0
-      ? Number((totalRev / totalOrders).toFixed(2))
-      : 0;
+  // Unified Summary KPI AOV:
+  // For single ad, matches the ad's AOV exactly
+  // For multiple ads, transactions-weighted average of native aov across all rows: Σ(row_aov_i × row_txns_i) / Σ(row_txns_i)
+  let overallAov = 0;
+  if (aggregatedAds.length === 1) {
+    overallAov = aggregatedAds[0].aov;
+  } else {
+    let allWeightedAovSum = 0;
+    let allTxnsSum = 0;
+    for (const group of adGroupMap.values()) {
+      for (const r of group.rows) {
+        allWeightedAovSum += r.aov * r.txns;
+        allTxnsSum += r.txns;
+      }
+    }
+
+    if (allTxnsSum > 0.000001) {
+      overallAov = Number((allWeightedAovSum / allTxnsSum).toFixed(2));
+    } else {
+      overallAov = 0;
+    }
+  }
+  console.log(`[FINAL SUMMARY OVERALL AOV] -> overallAov: $${overallAov}`);
 
   console.log("=== STEP 5: FINAL AGGREGATED NUMBERS ===");
   console.log({

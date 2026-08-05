@@ -190,7 +190,7 @@ export default function App() {
 
       {/* Footer Branding */}
       <footer className="py-8 text-center text-[11px] font-mono tracking-widest text-zinc-600 uppercase border-t border-white/5 mt-12">
-        POWERED BY TRIPLE WHALE DATA ENGINE
+        POWERED BY Northbeam DATA ENGINE
       </footer>
     </div>
   );
