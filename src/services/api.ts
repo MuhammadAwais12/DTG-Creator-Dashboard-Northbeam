@@ -49,10 +49,10 @@ export async function validateCreatorCode(
     console.warn("Server validation request failed, checking client cache:", err);
   }
 
-  // Fallback check against cachedCodes if server request failed
+  // If server request failed, only validate against non-empty cached active codes
   const normalizedCached = cachedCodes.map((c) => normalizeCreatorCode(c));
-  const isValid = normalizedCached.length === 0 || normalizedCached.includes(normalizedInput);
-  console.log(`[Fallback Validation] Client cache check: ${isValid}`);
+  const isValid = normalizedCached.length > 0 && normalizedCached.includes(normalizedInput);
+  console.log(`[Validation Check] Client cache check for ${normalizedInput}: ${isValid}`);
   return { isValid, normalizedCode: normalizedInput };
 }
 

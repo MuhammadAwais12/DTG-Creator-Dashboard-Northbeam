@@ -45,7 +45,7 @@ export const VideoModal: React.FC<VideoModalProps> = ({ ad, onClose }) => {
         </div>
 
         {/* Video / Media Player */}
-        <div className="bg-black relative flex items-center justify-center min-h-[300px]">
+        <div className="bg-black relative flex items-center justify-center min-h-[260px]">
           {ad.videoUrl ? (
             <video
               src={ad.videoUrl}
@@ -54,7 +54,7 @@ export const VideoModal: React.FC<VideoModalProps> = ({ ad, onClose }) => {
               playsInline
               className="w-full max-h-[55vh] object-contain bg-black"
             />
-          ) : (
+          ) : ad.adImageUrl ? (
             <div className="p-8 text-center flex flex-col items-center">
               <img
                 src={ad.adImageUrl}
@@ -64,6 +64,27 @@ export const VideoModal: React.FC<VideoModalProps> = ({ ad, onClose }) => {
               <p className="text-xs text-zinc-400">
                 Video player preview not available for this ad.
               </p>
+            </div>
+          ) : (
+            <div className="p-8 text-center flex flex-col items-center justify-center space-y-3">
+              <div className="w-12 h-12 rounded-2xl bg-zinc-900 border border-white/10 flex items-center justify-center text-zinc-500">
+                <ShoppingBag className="w-6 h-6" />
+              </div>
+              <div className="space-y-1">
+                <p className="text-sm font-semibold text-white">Media Preview Unavailable</p>
+                <p className="text-xs text-zinc-400 max-w-sm">
+                  Direct media stream is not provided in the reporting export. Click below to view the post on the platform ad library.
+                </p>
+              </div>
+              <a
+                href={fallbackUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 text-xs font-semibold border border-indigo-500/30 transition-colors"
+              >
+                <span>View on Ad Library</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
             </div>
           )}
         </div>

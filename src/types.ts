@@ -7,7 +7,7 @@ export interface AdMetric {
   spend: number;
   convValue: number;
   orders: number;
-  adImageUrl: string;
+  adImageUrl?: string;
   videoUrl?: string;
   // Computed fields (or calculated by frontend/backend)
   roas?: number;
