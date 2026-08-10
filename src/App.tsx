@@ -1,12 +1,13 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { AdMetric, CreatorUser, DateRange, KpiMetrics } from "./types";
-import { fetchCreatorCodes, fetchCreatorMetrics } from "./services/api";
+import { AdMetric, CreatorUser, DateRange, KpiMetrics, TopAdMetric } from "./types";
+import { fetchCreatorCodes, fetchCreatorMetrics, fetchTopAds } from "./services/api";
 import { extractCreatorName } from "./utils/creator";
 import { LoginScreen } from "./components/LoginScreen";
 import { Header } from "./components/Header";
 import { DateFilter } from "./components/DateFilter";
 import { KpiCards } from "./components/KpiCards";
 import { AdsTable } from "./components/AdsTable";
+import { TopAdsGrid } from "./components/TopAdsGrid";
 import { VideoModal } from "./components/VideoModal";
 import { KpiSkeletons, TableSkeleton } from "./components/Skeletons";
 import { AlertTriangle, RefreshCw, X } from "lucide-react";
@@ -17,7 +18,9 @@ export default function App() {
   const [dateRange, setDateRange] = useState<DateRange>("7d");
   const [kpis, setKpis] = useState<KpiMetrics | null>(null);
   const [ads, setAds] = useState<AdMetric[]>([]);
+  const [topAds, setTopAds] = useState<TopAdMetric[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isTopAdsLoading, setIsTopAdsLoading] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [selectedAdForModal, setSelectedAdForModal] = useState<AdMetric | null>(null);
 
@@ -69,15 +72,30 @@ export default function App() {
     }
   }, []);
 
+  // Load global top 10 ads for benchmark section
+  const loadTopAds = useCallback(async (range: DateRange) => {
+    setIsTopAdsLoading(true);
+    try {
+      const topAdsData = await fetchTopAds(range);
+      setTopAds(topAdsData);
+    } catch (err) {
+      console.error("Failed to load top ads:", err);
+    } finally {
+      setIsTopAdsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (user?.code) {
       loadDashboardData(user.code, dateRange);
+      loadTopAds(dateRange);
     }
-  }, [user, dateRange, loadDashboardData]);
+  }, [user, dateRange, loadDashboardData, loadTopAds]);
 
   const handleRetry = () => {
     if (user?.code) {
       loadDashboardData(user.code, dateRange);
+      loadTopAds(dateRange);
     }
   };
 
@@ -179,6 +197,13 @@ export default function App() {
               onOpenVideoModal={(ad) => setSelectedAdForModal(ad)}
             />
           )}
+
+          {/* Top 10 High Conversion Ads Section (Global Benchmark) */}
+          <TopAdsGrid
+            topAds={topAds}
+            isLoading={isTopAdsLoading}
+            dateRange={dateRange}
+          />
         </main>
       </div>
 
