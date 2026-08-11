@@ -28,8 +28,3 @@ export interface CreatorUser {
   name: string;
   code: string;
 }
-
-export interface TopAdMetric extends AdMetric {
-  creatorTag?: string;
-  attributedRevenue?: number;
-}

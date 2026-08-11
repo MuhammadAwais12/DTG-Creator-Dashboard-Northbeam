@@ -94,7 +94,7 @@ export async function getCreatorsList(): Promise<{ creators: string[]; adNames: 
 
 const metricsCache = new Map<string, { timestamp: number; data: any }>();
 const metricsInflight = new Map<string, Promise<any>>();
-const METRICS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes cache
+const METRICS_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes cache
 
 export async function getMetrics(creatorCode: string, dateRange: string) {
   const normalizedTargetCode = normalizeCreatorCode(creatorCode);
@@ -123,7 +123,12 @@ export async function getMetrics(creatorCode: string, dateRange: string) {
       return data;
     } catch (err: any) {
       console.error(`[Northbeam Error] Failed fetching live export for ${normalizedTargetCode} (${dateRange}):`, err?.message || err);
-      // Never substitute fake/fallback data. Rethrow error.
+      // If we have previous cached data for this creator and range, serve it gracefully
+      const staleCached = metricsCache.get(cacheKey);
+      if (staleCached?.data) {
+        console.log(`[Northbeam Fallback] Serving cached metrics for ${cacheKey} after export timeout`);
+        return staleCached.data;
+      }
       throw err;
     } finally {
       metricsInflight.delete(cacheKey);
@@ -243,42 +248,48 @@ async function fetchMetricsFromNorthbeam(normalizedTargetCode: string, dateRange
 
   console.log(`[Northbeam STEP 1 SUCCESS] Saved Export ID: ${exportId}`);
 
-  // STEP 2 — Poll for Result with 45s safety timeout
+  // STEP 2 — Poll for Result with 75s safety timeout
   console.log(`[Northbeam STEP 2] Polling result for export ID ${exportId}...`);
   let resultData: any = null;
   let pollSuccess = false;
   const pollStartTime = Date.now();
-  const MAX_POLL_MS = 45000;
+  const MAX_POLL_MS = 75000;
 
-  for (let attempt = 1; attempt <= 30; attempt++) {
+  for (let attempt = 1; attempt <= 45; attempt++) {
     if (Date.now() - pollStartTime > MAX_POLL_MS) {
-      console.warn(`[Northbeam STEP 2] Polling reached safety timeout threshold of 45s for export ID ${exportId}`);
+      console.warn(`[Northbeam STEP 2] Polling reached safety timeout threshold of 75s for export ID ${exportId}`);
       break;
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    const pollRes = await fetch(`https://api.northbeam.io/v1/exports/data-export/result/${exportId}`, {
-      method: "GET",
-      headers: {
-        "Authorization": apiKey,
-        "Data-Client-ID": clientId,
-      },
-    });
+    const delay = attempt <= 10 ? 1500 : 2000;
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    try {
+      const pollRes = await fetch(`https://api.northbeam.io/v1/exports/data-export/result/${exportId}`, {
+        method: "GET",
+        headers: {
+          "Authorization": apiKey,
+          "Data-Client-ID": clientId,
+        },
+      });
 
-    if (pollRes.ok) {
-      resultData = await pollRes.json();
-      console.log(`[Northbeam STEP 2 Poll ${attempt}/30] Status: ${resultData?.status}`);
+      if (pollRes.ok) {
+        resultData = await pollRes.json();
+        console.log(`[Northbeam STEP 2 Poll ${attempt}/45] Status: ${resultData?.status}`);
 
-      if (resultData?.status === "SUCCESS" || (Array.isArray(resultData?.result) && resultData.result.length > 0)) {
-        pollSuccess = true;
-        break;
+        if (resultData?.status === "SUCCESS" || (Array.isArray(resultData?.result) && resultData.result.length > 0)) {
+          pollSuccess = true;
+          break;
+        }
+
+        if (resultData?.status === "FAILED") {
+          throw new Error(`Northbeam export job status: FAILED`);
+        }
+      } else {
+        console.warn(`[Northbeam STEP 2 Poll ${attempt}/45] HTTP ${pollRes.status}`);
       }
-
-      if (resultData?.status === "FAILED") {
-        throw new Error(`Northbeam export job status: FAILED`);
-      }
-    } else {
-      console.warn(`[Northbeam STEP 2 Poll ${attempt}/30] HTTP ${pollRes.status}`);
+    } catch (pollErr: any) {
+      if (pollErr?.message?.includes("FAILED")) throw pollErr;
+      console.warn(`[Northbeam STEP 2 Poll ${attempt}/45] Network warn:`, pollErr?.message || pollErr);
     }
   }
 
@@ -535,250 +546,4 @@ async function fetchMetricsFromNorthbeam(normalizedTargetCode: string, dateRange
       overallAov,
     },
   };
-}
-
-const topAdsCache = new Map<string, { timestamp: number; data: any }>();
-const topAdsInflight = new Map<string, Promise<any>>();
-const TOP_ADS_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes cache
-
-export async function getTopAds(dateRange: string = "14d") {
-  const cacheKey = `top_ads_${dateRange}`;
-  const cached = topAdsCache.get(cacheKey);
-  if (cached && Date.now() - cached.timestamp < TOP_ADS_CACHE_TTL_MS) {
-    console.log(`[Northbeam Top Ads Cache] Returning cached top ads for ${dateRange}`);
-    return cached.data;
-  }
-
-  if (topAdsInflight.has(cacheKey)) {
-    return topAdsInflight.get(cacheKey)!;
-  }
-
-  const promise = (async () => {
-    try {
-      const data = await fetchTopAdsFromNorthbeam(dateRange);
-      topAdsCache.set(cacheKey, { timestamp: Date.now(), data });
-      return data;
-    } catch (err: any) {
-      console.error(`[Northbeam Top Ads Error]:`, err?.message || err);
-      throw err;
-    } finally {
-      topAdsInflight.delete(cacheKey);
-    }
-  })();
-
-  topAdsInflight.set(cacheKey, promise);
-  return promise;
-}
-
-async function fetchTopAdsFromNorthbeam(dateRange: string = "14d") {
-  const apiKey = process.env.NORTHBEAM_API_KEY;
-  const clientId = process.env.NORTHBEAM_CLIENT_ID;
-
-  if (!apiKey || !clientId) {
-    throw new Error("NORTHBEAM_API_KEY and NORTHBEAM_CLIENT_ID must be configured");
-  }
-
-  const periodMap: Record<string, string> = {
-    "7d": "LAST_7_DAYS",
-    "14d": "LAST_14_DAYS",
-    "30d": "LAST_30_DAYS",
-    "90d": "LAST_90_DAYS",
-  };
-
-  const periodType = periodMap[dateRange] || "LAST_14_DAYS";
-
-  const exportPayload = {
-    export_file_name: `top_ads_${dateRange}_${Date.now()}`,
-    level: "ad",
-    time_granularity: "DAILY",
-    period_type: periodType,
-    attribution_options: {
-      attribution_models: ["northbeam_custom__va"],
-      attribution_windows: ["7", "14"],
-      accounting_modes: ["accrual"],
-    },
-    metrics: [
-      { id: "spend" },
-      { id: "rev" },
-      { id: "roas" },
-      { id: "txns" },
-      { id: "aov" },
-    ],
-  };
-
-  console.log("[Northbeam Top Ads] Requesting data export...");
-  const exportRes = await fetch("https://api.northbeam.io/v1/exports/data-export", {
-    method: "POST",
-    headers: {
-      "Authorization": apiKey,
-      "Data-Client-ID": clientId,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(exportPayload),
-  });
-
-  if (!exportRes.ok) {
-    const errText = await exportRes.text();
-    throw new Error(`Northbeam top ads export failed: HTTP ${exportRes.status} - ${errText}`);
-  }
-
-  const exportData: any = await exportRes.json();
-  const exportId = exportData.id;
-  if (!exportId) {
-    throw new Error("Missing export ID for top ads");
-  }
-
-  // Poll for result
-  let resultData: any = null;
-  let pollSuccess = false;
-  const pollStartTime = Date.now();
-  const MAX_POLL_MS = 45000;
-
-  for (let attempt = 1; attempt <= 30; attempt++) {
-    if (Date.now() - pollStartTime > MAX_POLL_MS) {
-      break;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    const pollRes = await fetch(`https://api.northbeam.io/v1/exports/data-export/result/${exportId}`, {
-      method: "GET",
-      headers: {
-        "Authorization": apiKey,
-        "Data-Client-ID": clientId,
-      },
-    });
-
-    if (pollRes.ok) {
-      resultData = await pollRes.json();
-      if (resultData?.status === "SUCCESS" || (Array.isArray(resultData?.result) && resultData.result.length > 0)) {
-        pollSuccess = true;
-        break;
-      }
-      if (resultData?.status === "FAILED") {
-        throw new Error("Northbeam export job failed");
-      }
-    }
-  }
-
-  if (!pollSuccess || !resultData || !Array.isArray(resultData.result) || resultData.result.length === 0) {
-    throw new Error("Northbeam top ads export is taking longer than usual to complete");
-  }
-
-  const csvUrl = resultData.result[0];
-  const csvRes = await fetch(csvUrl);
-  if (!csvRes.ok) {
-    throw new Error(`Failed to download top ads CSV: HTTP ${csvRes.status}`);
-  }
-
-  const csvText = await csvRes.text();
-  const parsedCsv = Papa.parse<any>(csvText, {
-    header: true,
-    skipEmptyLines: true,
-  });
-
-  const rawRows = parsedCsv.data || [];
-  const accrualRows = rawRows.filter((row: any) => {
-    const modeStr = String(row.accounting_mode || "").toLowerCase();
-    return modeStr.includes("accrual") && !modeStr.includes("cash");
-  });
-
-  interface AdGroup {
-    adName: string;
-    channel: string;
-    spend: number;
-    rev: number;
-    txns: number;
-    rows: { spend: number; rev: number; txns: number; aov: number }[];
-  }
-
-  const adGroupMap = new Map<string, AdGroup>();
-
-  for (const row of accrualRows) {
-    const adName = (row.ad_name || row.breakdown_ad_consolidation || "").trim();
-    if (!adName || adName === "(no name)") continue;
-
-    const rawRevStr = row.rev !== undefined && row.rev !== null ? String(row.rev).trim() : "";
-    const rawRoasStr = row.roas !== undefined && row.roas !== null ? String(row.roas).trim() : "";
-    const rawSpendStr = row.spend !== undefined && row.spend !== null ? String(row.spend).trim() : "";
-    const rawTxnsStr = String(row.transactions || row.txns || row.orders || "").trim();
-    const rawAovStr = row.aov !== undefined && row.aov !== null ? String(row.aov).trim() : "";
-
-    const rowSpend = parseFloat(rawSpendStr) || 0;
-    const rowRoasVal = parseFloat(rawRoasStr) || 0;
-    const rowTxns = parseFloat(rawTxnsStr) || 0;
-    const rowAov = parseFloat(rawAovStr) || 0;
-
-    let rowRev = 0;
-    if (rawRevStr !== "") {
-      rowRev = parseFloat(rawRevStr) || 0;
-    } else if (rawRoasStr !== "" && rowSpend > 0) {
-      rowRev = rowSpend * rowRoasVal;
-    } else if (rowAov > 0 && rowTxns > 0) {
-      rowRev = rowAov * rowTxns;
-    }
-
-    const platform = (row.platform || row.channel_name || row.campaign_name || "").toLowerCase();
-    const resolvedChannel = platform.includes("tiktok") ? "tiktok-ads" : "facebook-ads";
-
-    if (!adGroupMap.has(adName)) {
-      adGroupMap.set(adName, {
-        adName,
-        channel: resolvedChannel,
-        spend: 0,
-        rev: 0,
-        txns: 0,
-        rows: [],
-      });
-    }
-
-    const group = adGroupMap.get(adName)!;
-    group.spend += rowSpend;
-    group.rev += rowRev;
-    group.txns += rowTxns;
-    group.rows.push({
-      spend: rowSpend,
-      rev: rowRev,
-      txns: rowTxns,
-      aov: rowAov,
-    });
-  }
-
-  const aggregatedAds = Array.from(adGroupMap.values()).map((g, idx) => {
-    const spend = Number(g.spend.toFixed(2));
-    const convValue = Number(g.rev.toFixed(2));
-    const roas = g.spend > 0 ? Number((g.rev / g.spend).toFixed(2)) : (spend > 0 ? Number((convValue / spend).toFixed(2)) : 0);
-    const orders = Number(g.txns.toFixed(2));
-
-    let calculatedAov = 0;
-    const sumWeightedAov = g.rows.reduce((sum, r) => sum + r.aov * r.txns, 0);
-    const sumTxns = g.rows.reduce((sum, r) => sum + r.txns, 0);
-    if (sumTxns > 0.0001) {
-      calculatedAov = sumWeightedAov / sumTxns;
-    }
-    const aov = Number(calculatedAov.toFixed(2));
-
-    const creatorCode = normalizeCreatorCode(g.adName);
-    const creatorTag = extractCreatorName(g.adName, creatorCode || "Down to Ground");
-
-    return {
-      adId: `top_nb_${idx + 1}`,
-      adName: g.adName,
-      creatorTag,
-      creatorCode: creatorCode || undefined,
-      channel: g.channel,
-      spend,
-      convValue,
-      roas,
-      orders,
-      aov,
-    };
-  });
-
-  // Rank by highest-converting ads (Conv. Value descending, then ROAS descending)
-  const validAds = aggregatedAds.filter((a) => a.spend > 0 || a.convValue > 0);
-  validAds.sort((a, b) => b.convValue - a.convValue || b.roas - a.roas);
-
-  const top10 = validAds.slice(0, 10);
-  console.log(`[Northbeam Top Ads] Successfully retrieved and ranked top ${top10.length} ads`);
-
-  return { ads: top10 };
 }

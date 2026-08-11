@@ -1,4 +1,4 @@
-import { AdMetric, DateRange, KpiMetrics, TopAdMetric } from "../types";
+import { AdMetric, DateRange, KpiMetrics } from "../types";
 import { normalizeCreatorCode } from "../utils/creator";
 
 export async function fetchCreatorCodes(): Promise<string[]> {
@@ -138,24 +138,5 @@ export async function fetchCreatorMetrics(
   } catch (error) {
     console.error("Error fetching creator metrics:", error);
     throw error;
-  }
-}
-
-export async function fetchTopAds(dateRange: DateRange = "14d"): Promise<TopAdMetric[]> {
-  try {
-    const res = await fetch(`/api/northbeam/top-ads?dateRange=${encodeURIComponent(dateRange)}`);
-    if (!res.ok) {
-      throw new Error("Failed to fetch top ads");
-    }
-    const data = await res.json();
-    return (data.ads || []).map((ad: any) => ({
-      ...ad,
-      roas: ad.spend > 0 ? ad.convValue / ad.spend : 0,
-      aov: ad.orders > 0 ? ad.convValue / ad.orders : 0,
-      estCommission: ad.convValue * 0.10,
-    }));
-  } catch (error) {
-    console.error("Error fetching top ads:", error);
-    return [];
   }
 }

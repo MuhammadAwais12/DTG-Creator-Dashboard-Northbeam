@@ -1,5 +1,5 @@
 import express from "express";
-import { getCreatorsList, getMetrics, getTopAds } from "./northbeam.js";
+import { getCreatorsList, getMetrics } from "./northbeam.js";
 import { normalizeCreatorCode } from "../src/utils/creator.js";
 
 const app = express();
@@ -128,21 +128,6 @@ app.get(["/api/northbeam/metrics", "/api/metrics"], async (req, res) => {
       error: isTimeout ? "Northbeam is taking longer than usual to respond, please try again" : msg,
       retryable: true,
     });
-  }
-});
-
-// 3. Route for Top 10 High Conversion Ads
-app.get(["/api/northbeam/top-ads", "/api/top-ads"], async (req, res) => {
-  // Edge/CDN response caching header for Vercel and downstream proxies
-  res.setHeader("Cache-Control", "s-maxage=300, stale-while-revalidate=600");
-
-  try {
-    const dateRange = (req.query.dateRange as string) || "14d";
-    const data = await getTopAds(dateRange);
-    res.json(data);
-  } catch (error: any) {
-    console.error("Error in /api/northbeam/top-ads:", error);
-    res.status(500).json({ error: error?.message || "Failed to fetch top ads" });
   }
 });
 
