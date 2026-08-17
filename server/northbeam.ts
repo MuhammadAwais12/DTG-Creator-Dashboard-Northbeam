@@ -208,7 +208,7 @@ async function fetchMetricsFromNorthbeam(normalizedTargetCode: string, dateRange
       },
     ],
     attribution_options: {
-      attribution_models: ["northbeam_custom__va"],
+      attribution_models: ["northbeam_custom__enh"],
       attribution_windows: Array.from(new Set([targetWindow, "7"])),
       accounting_modes: ["accrual"],
     },
